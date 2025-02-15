@@ -1,5 +1,5 @@
 ### 📋 README - ArXiv Document Genie  
-### 🚀 Live App: ArXiv Document Genie
+### 🚀 Live App: [ArXiv Document Genie](https://arxiv-document-genie.streamlit.app/)
 #### 📚 Overview  
 ArXiv Document Genie is a **Streamlit-based chatbot** that allows users to fetch **research papers from ArXiv** and interact with them using **Google Gemini AI**. The system processes **ArXiv paper content**, stores it in a **FAISS vector database**, and enables **question-answering** using **retrieval-augmented generation (RAG).**  
 
