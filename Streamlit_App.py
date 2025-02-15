@@ -60,6 +60,8 @@ def get_default_response(user_question, arxiv_title):
         "good afternoon": f"Good afternoon! What would you like to know about '{arxiv_title}'?",
         "good evening": f"Good evening! Feel free to ask anything about '{arxiv_title}'.",
         "bye": "Goodbye! Have a great day and let me know if you need any help in the future.",
+        "okay bye": "Goodbye! Have a great day and let me know if you need any help in the future.",
+        "ok bye": "Goodbye! Have a great day and let me know if you need any help in the future.",
         "can you tell me again the answer of my previous prompts": "Certainly! Here’s a summary of our previous conversation:\n"
         + "\n".join([f"**You:** {q}\n**AI:** {a}" for q, a in st.session_state.chat_history]),
         "my previous prompts": "Certainly! Here’s a summary of our previous conversation:\n"
