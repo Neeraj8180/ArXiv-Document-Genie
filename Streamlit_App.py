@@ -3,50 +3,62 @@ from langchain_community.document_loaders import ArxivLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import google.generativeai as genai
-from langchain_community.vectorstores import FAISS 
+from langchain_community.vectorstores import FAISS
 from langchain.chains import StuffDocumentsChain, LLMChain
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
-from langchain.schema import Document  # Import Document
+from langchain.schema import Document
 import os
 import time
 
 def get_arxiv_text(arxiv_id):
     """Fetches the text content and title of a given ArXiv paper using its ID."""
-    loader = ArxivLoader(query=arxiv_id)
-    docs = loader.load()
-    title = docs[0].metadata.get("title", "this paper")  # Default to "this paper" if title is missing
-    return "\n".join([doc.page_content for doc in docs]), title
+    try:
+        loader = ArxivLoader(query=arxiv_id)
+        docs = loader.load()
+        title = docs[0].metadata.get("title", "this paper")  # Default to "this paper" if title is missing
+        return "\n".join([doc.page_content for doc in docs]), title
+    except Exception as e:
+        st.error(f"Error fetching ArXiv paper: {str(e)}")
+        return None, None
 
 def get_text_chunks(text):
     """Splits the ArXiv paper text into smaller chunks for efficient processing."""
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=1000)
-    return text_splitter.split_text(text)
+    try:
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=1000)
+        return text_splitter.split_text(text)
+    except Exception as e:
+        st.error(f"Error splitting text into chunks: {str(e)}")
+        return []
 
 def get_vector_store(text_chunks, api_key):
     """Converts text chunks into vector embeddings and stores them in FAISS for retrieval."""
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
-    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-    vector_store.save_local("faiss_index")
+    try:
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+        vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
+        vector_store.save_local("faiss_index")
+        st.success("Vector store created and saved successfully.")
+    except Exception as e:
+        st.error(f"Error creating vector store: {str(e)}")
 
 def get_conversational_chain(api_key):
     """Creates a conversational AI chain that retrieves and answers questions using an LLM."""
-    prompt_template = """
-    Answer the question as detailed as possible from the provided context. If the answer is not in
-    the context, summarize the entire document in your own words as best as possible.
-    
-    Context:\n {context}\n
-    Question: \n{question}\n
-    Answer:
-    """
-    model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3, google_api_key=api_key) #temperature introduced randomness 
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    
-    # Uses StuffDocumentsChain to properly process and answer questions from retrieved documents
-    stuff_chain = StuffDocumentsChain(llm_chain=LLMChain(llm=model, prompt=prompt), document_variable_name="context")
-    
-    return stuff_chain
+    try:
+        prompt_template = """
+        Answer the question as detailed as possible from the provided context. If the answer is not in
+        the context, summarize the entire document in your own words as best as possible.
+        
+        Context:\n {context}\n
+        Question: \n{question}\n
+        Answer:
+        """
+        model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3, google_api_key=api_key)
+        prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
+        stuff_chain = StuffDocumentsChain(llm_chain=LLMChain(llm=model, prompt=prompt), document_variable_name="context")
+        return stuff_chain
+    except Exception as e:
+        st.error(f"Error creating conversational chain: {str(e)}")
+        return None
 
 def get_default_response(user_question, arxiv_title):
     """Provides predefined responses for common greetings and previous prompt retrieval."""
@@ -82,17 +94,22 @@ def user_input():
     if default_response:
         st.session_state.chat_history.append((user_question, default_response))
     else:
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=st.session_state.api_key)
-        new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        docs = new_db.similarity_search(user_question, k=5)
-        
-        if not docs or user_question.lower() in ["detailed summary", "detailed summary of 200 words"]:
-            raw_text = "\n".join([doc.page_content for doc in new_db.docstore._dict.values()]) 
-            docs = [Document(page_content=raw_text, metadata={"source": "ArXiv"})]  # Wrap in Document object
-        
-        chain = get_conversational_chain(st.session_state.api_key)
-        response = chain.invoke({"input_documents": docs, "question": user_question})
-        st.session_state.chat_history.append((user_question, response["output_text"]))
+        try:
+            embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=st.session_state.api_key)
+            new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+            docs = new_db.similarity_search(user_question, k=5)
+            
+            if not docs or user_question.lower() in ["detailed summary", "detailed summary of 200 words"]:
+                raw_text = "\n".join([doc.page_content for doc in new_db.docstore._dict.values()]) 
+                docs = [Document(page_content=raw_text, metadata={"source": "ArXiv"})]  # Wrap in Document object
+            
+            chain = get_conversational_chain(st.session_state.api_key)
+            if chain:
+                response = chain.invoke({"input_documents": docs, "question": user_question})
+                st.session_state.chat_history.append((user_question, response["output_text"]))
+        except Exception as e:
+            st.error(f"Error processing your question: {str(e)}")
+            st.session_state.chat_history.append((user_question, "Sorry, I couldn't process your request. Please try again."))
     
     st.session_state.user_input = ""
 
@@ -122,10 +139,12 @@ def main():
         if st.session_state.arxiv_id and st.button("Fetch and Process Paper") and st.session_state.api_key:
             with st.spinner("Fetching and Processing Paper..."):
                 raw_text, st.session_state.arxiv_title = get_arxiv_text(st.session_state.arxiv_id)
-                text_chunks = get_text_chunks(raw_text)
-                get_vector_store(text_chunks, st.session_state.api_key)
-                st.session_state.conversation_started = True
-                st.rerun()
+                if raw_text and st.session_state.arxiv_title:
+                    text_chunks = get_text_chunks(raw_text)
+                    if text_chunks:
+                        get_vector_store(text_chunks, st.session_state.api_key)
+                        st.session_state.conversation_started = True
+                        st.rerun()
     else:
         st.sidebar.title("Chat History")
         for question, answer in st.session_state.chat_history:
