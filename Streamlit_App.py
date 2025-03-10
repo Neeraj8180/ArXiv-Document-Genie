@@ -3,155 +3,227 @@ from langchain_community.document_loaders import ArxivLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import google.generativeai as genai
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS 
 from langchain.chains import StuffDocumentsChain, LLMChain
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
+from google.api_core import exceptions
 import os
 import time
 
+def validate_api_key(api_key):
+    """Validate basic API key format and accessibility"""
+    try:
+        if not api_key.startswith("AIza"):
+            raise ValueError("Invalid API key format. Google API keys start with 'AIza'")
+            
+        genai.configure(api_key=api_key)
+        models = genai.list_models()
+        if "models/gemini-pro" not in [m.name for m in models]:
+            raise PermissionError("Gemini Pro model not accessible. Enable API in Google Cloud Console.")
+        return True
+    except Exception as e:
+        st.error(f"API Validation Failed: {str(e)}")
+        return False
+
 def get_arxiv_text(arxiv_id):
-    """Fetches the text content and title of a given ArXiv paper using its ID."""
+    """Fetch and validate ArXiv paper"""
     try:
         loader = ArxivLoader(query=arxiv_id)
         docs = loader.load()
-        title = docs[0].metadata.get("title", "this paper")  # Default to "this paper" if title is missing
+        if not docs:
+            raise ValueError("No paper found with this ID")
+        title = docs[0].metadata.get("title", "this paper")
         return "\n".join([doc.page_content for doc in docs]), title
     except Exception as e:
-        st.error(f"Error fetching ArXiv paper: {str(e)}")
+        st.error(f"ArXiv Error: {str(e)}")
         return None, None
 
 def get_text_chunks(text):
-    """Splits the ArXiv paper text into smaller chunks for efficient processing."""
+    """Safe text splitting"""
     try:
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=1000)
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=5000, 
+            chunk_overlap=1000,
+            separators=["\n\n", "\n", " ", ""]
+        )
         return text_splitter.split_text(text)
     except Exception as e:
-        st.error(f"Error splitting text into chunks: {str(e)}")
+        st.error(f"Text Processing Error: {str(e)}")
         return []
 
 def get_vector_store(text_chunks, api_key):
-    """Converts text chunks into vector embeddings and stores them in FAISS for retrieval."""
+    """Create FAISS store with validation"""
     try:
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+        if not text_chunks:
+            raise ValueError("No text chunks to process")
+            
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/embedding-001",
+            google_api_key=api_key
+        )
         vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
         vector_store.save_local("faiss_index")
-        st.success("Vector store created and saved successfully.")
+        return True
     except Exception as e:
-        st.error(f"Error creating vector store: {str(e)}")
+        st.error(f"Vector Store Error: {str(e)}")
+        return False
 
 def get_conversational_chain(api_key):
-    """Creates a conversational AI chain that retrieves and answers questions using an LLM."""
+    """Create conversation chain with enhanced validation"""
     try:
+        genai.configure(api_key=api_key)  # Critical configuration
+        
         prompt_template = """
-        Answer the question as detailed as possible from the provided context. If the answer is not in
-        the context, summarize the entire document in your own words as best as possible.
+        Answer the question as detailed as possible from the provided context. 
+        If the answer isn't in the context, summarize the document clearly.
         
         Context:\n {context}\n
         Question: \n{question}\n
         Answer:
         """
-        model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3, google_api_key=api_key)
-        prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-        stuff_chain = StuffDocumentsChain(llm_chain=LLMChain(llm=model, prompt=prompt), document_variable_name="context")
-        return stuff_chain
+        
+        model = ChatGoogleGenerativeAI(
+            model="gemini-pro",
+            temperature=0.3,
+            google_api_key=api_key,
+            max_retries=3,
+            timeout=30
+        )
+        
+        prompt = PromptTemplate(
+            template=prompt_template,
+            input_variables=["context", "question"]
+        )
+        
+        return StuffDocumentsChain(
+            llm_chain=LLMChain(llm=model, prompt=prompt),
+            document_variable_name="context"
+        )
+    except exceptions.NotFound:
+        st.error("Model not found. Verify model name/API access.")
     except Exception as e:
-        st.error(f"Error creating conversational chain: {str(e)}")
-        return None
+        st.error(f"Chain Creation Error: {str(e)}")
+    return None
 
 def get_default_response(user_question, arxiv_title):
-    """Provides predefined responses for common greetings and previous prompt retrieval."""
+    """Predefined responses with case insensitivity"""
+    normalized_input = user_question.lower().strip()
     greetings = {
-        "hi": f"Hi! It's my pleasure to chat with you. How can I help you with '{arxiv_title}'?",
-        "hello": f"Hello! I'm here to assist you with '{arxiv_title}'. How can I help?",
-        "thank you": "You're welcome! Feel free to ask anything about the paper.",
-        "thankyou": "You're welcome! Feel free to ask anything about the paper.",
-        "thanks": "You're welcome! Let me know if you have more questions.",
-        "good morning": f"Good morning! How can I assist you with '{arxiv_title}'?",
-        "good afternoon": f"Good afternoon! What would you like to know about '{arxiv_title}'?",
-        "good evening": f"Good evening! Feel free to ask anything about '{arxiv_title}'.",
-        "bye": "Goodbye! Have a great day and let me know if you need any help in the future.",
-        "okay bye": "Goodbye! Have a great day and let me know if you need any help in the future.",
-        "ok bye": "Goodbye! Have a great day and let me know if you need any help in the future.",
-        "can you tell me again the answer of my previous prompts": "Certainly! Here’s a summary of our previous conversation:\n"
-        + "\n".join([f"**You:** {q}\n**AI:** {a}" for q, a in st.session_state.chat_history]),
-        "my previous prompts": "Certainly! Here’s a summary of our previous conversation:\n"
-        + "\n".join([f"**You:** {q}\n**AI:** {a}" for q, a in st.session_state.chat_history]),
+        "hi": f"Hi! Ask me anything about '{arxiv_title}'",
+        "hello": f"Hello! Let's discuss '{arxiv_title}'",
+        "thank you": "You're welcome!",
+        "bye": "Goodbye! Come back with more questions!",
+        "history": "\n".join([f"**Q:** {q}\n**A:** {a}" for q, a in st.session_state.chat_history]),
     }
-    return greetings.get(user_question.lower().strip(), None)
+    return greetings.get(normalized_input, None)
 
 def user_input():
-    """Handles user queries, retrieves relevant documents, and generates responses."""
+    """Process user input with comprehensive error handling"""
     user_question = st.session_state.user_input.strip()
     if not user_question:
         return
-    
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-    
-    default_response = get_default_response(user_question, st.session_state.arxiv_title)
-    if default_response:
-        st.session_state.chat_history.append((user_question, default_response))
-    else:
+
+    with st.spinner("Analyzing..."):
         try:
-            embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=st.session_state.api_key)
-            new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-            docs = new_db.similarity_search(user_question, k=5)
+            # Check API validity first
+            if not validate_api_key(st.session_state.api_key):
+                return
+                
+            # Handle predefined responses
+            if default_response := get_default_response(user_question, st.session_state.arxiv_title):
+                st.session_state.chat_history.append((user_question, default_response))
+                return
+
+            # Process technical questions
+            embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/embedding-001",
+                google_api_key=st.session_state.api_key
+            )
             
-            if not docs or user_question.lower() in ["detailed summary", "detailed summary of 200 words"]:
-                raw_text = "\n".join([doc.page_content for doc in new_db.docstore._dict.values()]) 
-                docs = [Document(page_content=raw_text, metadata={"source": "ArXiv"})]  # Wrap in Document object
+            vector_store = FAISS.load_local(
+                "faiss_index", 
+                embeddings, 
+                allow_dangerous_deserialization=True
+            )
             
+            docs = vector_store.similarity_search(user_question, k=5)
+            if not docs:
+                docs = [Document(
+                    page_content="\n".join([doc.page_content for doc in vector_store.docstore._dict.values()]),
+                    metadata={"source": "Full Paper"}
+                )]
+
             chain = get_conversational_chain(st.session_state.api_key)
             if chain:
-                response = chain.invoke({"input_documents": docs, "question": user_question})
+                response = chain.invoke(
+                    {"input_documents": docs, "question": user_question},
+                    config={"max_retries": 2, "timeout": 20}
+                )
                 st.session_state.chat_history.append((user_question, response["output_text"]))
+                
+        except exceptions.PermissionDenied:
+            st.error("API key rejected. Check key permissions.")
+        except exceptions.DeadlineExceeded:
+            st.error("Request timed out. Try a simpler question.")
         except Exception as e:
-            st.error(f"Error processing your question: {str(e)}")
-            st.session_state.chat_history.append((user_question, "Sorry, I couldn't process your request. Please try again."))
-    
+            st.error(f"Processing Error: {str(e)}")
+            st.session_state.chat_history.append((user_question, "Failed to process question"))
+
     st.session_state.user_input = ""
 
 def main():
-    """Manages the Streamlit app interface and workflow for fetching and interacting with ArXiv papers."""
-    st.set_page_config(page_title="ArXiv Document Genie", layout="wide")
+    """Streamlit UI with guided setup"""
+    st.set_page_config(page_title="ArXiv Genius", layout="wide")
     
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-    
-    if "conversation_started" not in st.session_state:
-        st.session_state.conversation_started = False
-    
+    # Session state initialization
+    for key in ["chat_history", "conversation_started", "api_key", "arxiv_id"]:
+        if key not in st.session_state:
+            st.session_state[key] = "" if key == "api_key" else [] if key == "chat_history" else False
+
     if not st.session_state.conversation_started:
         st.markdown("""
-                ## ArXiv Document Genie: Get instant insights from Research Papers
-                ## How to Use It:
-                1. **Enter Your API Key**: You'll need a Google API key for the chatbot to access Google's Generative AI models. Obtain your API key [here](https://makersuite.google.com/app/apikey).
-                2. **Enter an ArXiv Paper ID** (e.g., 2304.12345) and click **Fetch & Process Paper**.
-                   - You can find ArXiv Paper ID as a unique **Numbers in url when you open any paper** or inside **arXiv webpage it is mentioned for each paper**.
-                3. **Ask a Question**: Get instant answers based on the paper's content. And please use terms like '...from this paper' or '.....given paper' or '....fetched paper' to get closely related answers.
-                """)
-
-        st.session_state.api_key = st.text_input("Enter your Google API Key:", type="password")
-        st.session_state.arxiv_id = st.text_input("Enter the ArXiv Paper ID:")
+            ## 📄 ArXiv Genius: Research Paper Explorer
+            **How to Use:**
+            1. **Get API Key**: [Create Google API key](https://makersuite.google.com/app/apikey)
+            2. **Find Paper ID**: Use numbers from arXiv URL (e.g. `2303.18223`)
+            3. **Ask Questions**: About methods, results, or summaries
+            """)
+            
+        st.session_state.api_key = st.text_input("🔑 Google API Key:", type="password")
+        st.session_state.arxiv_id = st.text_input("📄 arXiv Paper ID:")
         
-        if st.session_state.arxiv_id and st.button("Fetch and Process Paper") and st.session_state.api_key:
-            with st.spinner("Fetching and Processing Paper..."):
-                raw_text, st.session_state.arxiv_title = get_arxiv_text(st.session_state.arxiv_id)
-                if raw_text and st.session_state.arxiv_title:
-                    text_chunks = get_text_chunks(raw_text)
-                    if text_chunks:
-                        get_vector_store(text_chunks, st.session_state.api_key)
-                        st.session_state.conversation_started = True
-                        st.rerun()
+        if st.button("🚀 Process Paper"):
+            if not validate_api_key(st.session_state.api_key):
+                return
+                
+            with st.spinner("🧠 Processing paper..."):
+                raw_text, title = get_arxiv_text(st.session_state.arxiv_id)
+                if not raw_text:
+                    return
+                    
+                chunks = get_text_chunks(raw_text)
+                if not chunks:
+                    st.error("Failed to process paper text")
+                    return
+                    
+                if get_vector_store(chunks, st.session_state.api_key):
+                    st.session_state.arxiv_title = title
+                    st.session_state.conversation_started = True
+                    st.rerun()
+                    
     else:
-        st.sidebar.title("Chat History")
-        for question, answer in st.session_state.chat_history:
-            st.markdown(f"<b style='color:blue;'>You:</b> {question}", unsafe_allow_html=True)
-            st.markdown(f"<b style='color:green;'>AI:</b> {answer}", unsafe_allow_html=True)
+        st.header(f"Chatting about: {st.session_state.arxiv_title}")
+        st.text_input("💬 Ask about the paper...", key="user_input", on_change=user_input)
         
-        st.text_input("Type your question and press Enter", key="user_input", on_change=user_input)
+        with st.expander("📜 Chat History"):
+            for q, a in st.session_state.chat_history:
+                st.markdown(f"**Q:** {q}  \n**A:** {a}")
+                
+        if st.button("🔄 Reset Session"):
+            st.session_state.clear()
+            st.rerun()
 
 if __name__ == "__main__":
     main()
